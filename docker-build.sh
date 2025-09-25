@@ -115,39 +115,48 @@ else
     echo "Warning: Cached Ollama binary not found"
 fi
 
-# Copy only essential Ollama files
-echo "Copying Ollama models (optimized)..."
-mkdir -p airootfs/root/.ollama/models
+# Copy Ollama models to a system location (will be read-only in live environment)
+echo "Installing Ollama models into squashfs..."
+mkdir -p airootfs/var/lib/ollama
 if [[ -d /cache/models ]]; then
-    # Only copy the actual model files, not manifests/blobs structure
-    cp -r /cache/models/* airootfs/root/.ollama/models/ 2>/dev/null || true
-    # Remove any unnecessary cache files
-    find airootfs/root/.ollama -name "*.tmp" -delete 2>/dev/null || true
-    find airootfs/root/.ollama -name "*.partial" -delete 2>/dev/null || true
+    echo "Copying model files..."
+    cp -r /cache/models/* airootfs/var/lib/ollama/ 2>/dev/null || true
 fi
 
-# Create a custom hook to install Python and NPM packages during ISO build
-echo "Creating package installation hook..."
-mkdir -p airootfs/etc/pacman.d/hooks
-cat > airootfs/root/install-ai-packages.sh << 'PKGINSTALL'
-#!/bin/bash
-echo "Installing AI packages..."
+# Create symlink for compatibility
+mkdir -p airootfs/root
+ln -sf /var/lib/ollama airootfs/root/.ollama 2>/dev/null || true
 
-# Install Python packages
+# Create customize_airootfs.sh script that runs during ISO build
+echo "Creating customize script for package installation..."
+cat > airootfs/root/customize_airootfs.sh << 'CUSTOMIZE'
+#!/bin/bash
+
+set -e -u
+
+echo "Customizing airootfs..."
+
+# Install Python packages directly into the squashfs
 echo "Installing fast-agent-mcp..."
-pip install --break-system-packages fast-agent-mcp mcp || true
+pip install --break-system-packages fast-agent-mcp mcp
 
 # Install NPM packages
 echo "Installing MCP servers..."
-npm install -g @modelcontextprotocol/server-filesystem @modelcontextprotocol/server-fetch || true
+npm install -g @modelcontextprotocol/server-filesystem @modelcontextprotocol/server-fetch
 
-# Clean up pip cache to save space
+# Clean up to save space in the squashfs
+echo "Cleaning up caches..."
 rm -rf /root/.cache/pip
 rm -rf /root/.npm
+rm -rf /var/cache/pacman/pkg/*
 
-echo "AI packages installed"
-PKGINSTALL
-chmod +x airootfs/root/install-ai-packages.sh
+# Set permissions
+chmod 755 /usr/local/bin/ai-installer 2>/dev/null || true
+chmod 755 /usr/bin/ai-installer 2>/dev/null || true
+
+echo "Customization complete"
+CUSTOMIZE
+chmod +x airootfs/root/customize_airootfs.sh
 
 # Create Ollama service directly in the image
 cat > airootfs/etc/systemd/system/ollama.service << 'OLLAMA'
@@ -162,7 +171,7 @@ ExecStart=/usr/local/bin/ollama serve
 Restart=always
 RestartSec=3
 Environment="OLLAMA_HOST=0.0.0.0"
-Environment="OLLAMA_MODELS=/root/.ollama/models"
+Environment="OLLAMA_MODELS=/var/lib/ollama/models"
 User=root
 
 [Install]
@@ -327,14 +336,8 @@ cat > airootfs/etc/motd << 'MOTD'
 ══════════════════════════════════════════════════════
 MOTD
 
-# Run the package installation before building ISO
-echo "Installing AI packages into airootfs..."
-arch-chroot /build/profile/airootfs /root/install-ai-packages.sh || true
-
-# Remove installation script to save space
-rm -f /build/profile/airootfs/root/install-ai-packages.sh
-
-# Build ISO
+# Build ISO - mkarchiso will automatically run customize_airootfs.sh
+echo "Building ISO (customize_airootfs.sh will run automatically)..."
 mkarchiso -v -w /tmp/work -o /output /build/profile
 BUILDSCRIPT
 
