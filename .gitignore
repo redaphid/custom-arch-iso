@@ -46,3 +46,4 @@ fish_prompt.fish
 __z
 __z*
 tmp/
+*.qcow2
