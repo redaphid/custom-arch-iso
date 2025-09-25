@@ -182,6 +182,7 @@ OLLAMA
 ln -sf /etc/systemd/system/ollama.service airootfs/etc/systemd/system/multi-user.target.wants/
 
 # Create ai-installer command
+mkdir -p airootfs/usr/local/bin
 cat > airootfs/usr/local/bin/ai-installer << 'AICOMMAND'
 #!/bin/bash
 python /root/ai-installer.py
@@ -189,6 +190,7 @@ AICOMMAND
 chmod +x airootfs/usr/local/bin/ai-installer
 
 # Make it available in PATH
+mkdir -p airootfs/usr/bin
 ln -sf /usr/local/bin/ai-installer airootfs/usr/bin/ai-installer
 
 # Fast-agent installer (uses cached packages)
