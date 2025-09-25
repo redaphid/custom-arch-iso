@@ -140,9 +140,9 @@ echo "Customizing airootfs..."
 echo "Installing fast-agent-mcp..."
 pip install --break-system-packages fast-agent-mcp mcp
 
-# Install NPM packages
+# Install NPM packages (only filesystem server available for now)
 echo "Installing MCP servers..."
-npm install -g @modelcontextprotocol/server-filesystem @modelcontextprotocol/server-fetch
+npm install -g @modelcontextprotocol/server-filesystem 2>/dev/null || echo "NPM packages optional"
 
 # Clean up to save space in the squashfs
 echo "Cleaning up caches..."
