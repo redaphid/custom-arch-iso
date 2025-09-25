@@ -62,18 +62,42 @@ else
         echo "   Error pulling model. Trying alternative method..."
     }
 
-    # Copy model files to our cache
-    if [ -d "$HOME/.ollama/models" ]; then
-        echo "   Copying model files to cache..."
-        mkdir -p "$MODEL_PATH"
-        cp -r "$HOME/.ollama/models/"* "$MODEL_PATH/" 2>/dev/null || true
-
-        # Also copy the blobs directory which contains actual model data
-        if [ -d "$HOME/.ollama/blobs" ]; then
-            mkdir -p "$MODELS_DIR/blobs"
-            cp -r "$HOME/.ollama/blobs/"* "$MODELS_DIR/blobs/" 2>/dev/null || true
+    # Find where Ollama stores models (could be in various locations)
+    OLLAMA_MODEL_DIR=""
+    for dir in "/usr/share/ollama/.ollama/models" "$HOME/.ollama/models" "/var/lib/ollama/models"; do
+        if [ -d "$dir" ]; then
+            OLLAMA_MODEL_DIR="$dir"
+            break
         fi
-        echo "   ✓ Model cached successfully"
+    done
+
+    if [ -n "$OLLAMA_MODEL_DIR" ]; then
+        echo "   Found Ollama models at: $OLLAMA_MODEL_DIR"
+        echo "   Copying model files to cache..."
+
+        # Copy entire models directory structure
+        if [ -r "$OLLAMA_MODEL_DIR" ]; then
+            cp -r "$OLLAMA_MODEL_DIR"/* "$MODELS_DIR/" 2>/dev/null || {
+                echo "   Direct copy failed, trying with different permissions..."
+                # If direct copy fails, try reading files individually
+                mkdir -p "$MODELS_DIR/blobs" "$MODELS_DIR/manifests"
+
+                # Copy blobs (the actual model data)
+                if [ -d "$OLLAMA_MODEL_DIR/blobs" ]; then
+                    for blob in "$OLLAMA_MODEL_DIR/blobs/"*; do
+                        [ -r "$blob" ] && cp "$blob" "$MODELS_DIR/blobs/" 2>/dev/null
+                    done
+                fi
+
+                # Copy manifests
+                if [ -d "$OLLAMA_MODEL_DIR/manifests" ]; then
+                    cp -r "$OLLAMA_MODEL_DIR/manifests"/* "$MODELS_DIR/manifests/" 2>/dev/null || true
+                fi
+            }
+            echo "   ✓ Model cached successfully"
+        else
+            echo "   Warning: Cannot read Ollama models directory (may need different permissions)"
+        fi
     else
         echo "   Warning: Could not find Ollama models directory"
     fi
