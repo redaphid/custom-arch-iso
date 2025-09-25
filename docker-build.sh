@@ -122,11 +122,36 @@ if [[ -d /cache/models ]]; then
     cp -r /cache/models/* airootfs/root/.ollama/ 2>/dev/null || true
 fi
 
-# Copy Python packages
-echo "Copying Python package cache..."
-mkdir -p airootfs/root/.pip-cache
+# Pre-install Python packages in the ISO
+echo "Pre-installing Python packages in airootfs..."
+mkdir -p airootfs/tmp/pip-cache
 if [[ -d /cache/pip-cache ]]; then
-    cp -r /cache/pip-cache/* airootfs/root/.pip-cache/ 2>/dev/null || true
+    echo "Copying wheel files to airootfs..."
+    cp /cache/pip-cache/*.whl airootfs/tmp/pip-cache/ 2>/dev/null || true
+
+    # Create installation script that will run IN the Docker container
+    cat > install-packages-in-airootfs.sh << 'INSTALLSCRIPT'
+#!/bin/bash
+echo "Installing Python packages in airootfs chroot..."
+for wheel in /tmp/pip-cache/*.whl; do
+    if [[ -f "$wheel" ]]; then
+        echo "Installing $(basename $wheel)..."
+        chroot /build/profile/airootfs pip install --break-system-packages "$wheel" 2>/dev/null || true
+    fi
+done
+# Verify installation
+if chroot /build/profile/airootfs python -c "import fast_agent_mcp" 2>/dev/null; then
+    echo "✓ fast-agent-mcp installed successfully"
+else
+    echo "⚠ Warning: fast-agent-mcp not installed, trying pip install..."
+    chroot /build/profile/airootfs pip install --break-system-packages fast-agent-mcp
+fi
+# Clean up cache
+rm -rf /build/profile/airootfs/tmp/pip-cache
+INSTALLSCRIPT
+    chmod +x install-packages-in-airootfs.sh
+    ./install-packages-in-airootfs.sh
+    rm -f install-packages-in-airootfs.sh
 fi
 
 # Copy NPM packages
@@ -159,40 +184,15 @@ OLLAMA
 # Enable the service
 ln -sf /etc/systemd/system/ollama.service airootfs/etc/systemd/system/multi-user.target.wants/
 
-# Install Python packages during build
-cat > airootfs/usr/local/bin/install-python-deps << 'PYDEPS'
+# Create ai-installer command
+cat > airootfs/usr/local/bin/ai-installer << 'AICOMMAND'
 #!/bin/bash
-echo "Installing Python dependencies..."
+python /root/ai-installer.py
+AICOMMAND
+chmod +x airootfs/usr/local/bin/ai-installer
 
-# First try cached packages
-if [[ -d /root/.pip-cache ]] && ls /root/.pip-cache/*.whl &>/dev/null; then
-    echo "Installing from cache..."
-    pip install --break-system-packages /root/.pip-cache/*.whl 2>/dev/null
-fi
-
-# Ensure fast-agent-mcp is installed
-if ! python -c "import fast_agent_mcp" 2>/dev/null; then
-    echo "Installing fast-agent-mcp..."
-    pip install --break-system-packages fast-agent-mcp
-fi
-PYDEPS
-chmod +x airootfs/usr/local/bin/install-python-deps
-
-# Run installation at boot
-cat > airootfs/etc/systemd/system/install-deps.service << 'DEPSVC'
-[Unit]
-Description=Install Python Dependencies
-Before=multi-user.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/install-python-deps
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-DEPSVC
-ln -sf /etc/systemd/system/install-deps.service airootfs/etc/systemd/system/multi-user.target.wants/
+# Make it available in PATH
+ln -sf /usr/local/bin/ai-installer airootfs/usr/bin/ai-installer
 
 # Fast-agent installer (uses cached packages)
 cat > airootfs/usr/local/bin/setup-fastagent << 'FASTAGENT'
@@ -300,19 +300,15 @@ if __name__ == "__main__":
 AIINSTALLER
 chmod +x airootfs/root/ai-installer.py
 
-# First boot setup (everything is pre-installed)
+# First boot setup - just start services and run installer
 cat > airootfs/root/first-boot.sh << 'FIRSTBOOT'
 #!/bin/bash
-# Start ollama service if not running
-systemctl start ollama 2>/dev/null || /usr/local/bin/setup-ollama
-
-# Setup fast-agent config if needed
-if [ ! -f ~/.config/fast-agent/fastagent.config.yaml ]; then
-    /usr/local/bin/setup-fastagent
-fi
+# Start ollama service
+systemctl start ollama 2>/dev/null
+sleep 2
 
 # Run the AI installer
-python /root/ai-installer.py
+ai-installer
 FIRSTBOOT
 chmod +x airootfs/root/first-boot.sh
 
@@ -329,7 +325,7 @@ cat > airootfs/root/.bash_profile << 'PROF'
 # Auto-start AI installer on login
 if [ -z "$AI_INSTALLER_RUNNING" ]; then
     export AI_INSTALLER_RUNNING=1
-    python /root/ai-installer.py
+    ai-installer
 fi
 PROF
 
