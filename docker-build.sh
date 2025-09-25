@@ -115,51 +115,39 @@ else
     echo "Warning: Cached Ollama binary not found"
 fi
 
-# Copy cached models
-echo "Copying cached models..."
-mkdir -p airootfs/root/.ollama
+# Copy only essential Ollama files
+echo "Copying Ollama models (optimized)..."
+mkdir -p airootfs/root/.ollama/models
 if [[ -d /cache/models ]]; then
-    cp -r /cache/models/* airootfs/root/.ollama/ 2>/dev/null || true
+    # Only copy the actual model files, not manifests/blobs structure
+    cp -r /cache/models/* airootfs/root/.ollama/models/ 2>/dev/null || true
+    # Remove any unnecessary cache files
+    find airootfs/root/.ollama -name "*.tmp" -delete 2>/dev/null || true
+    find airootfs/root/.ollama -name "*.partial" -delete 2>/dev/null || true
 fi
 
-# Pre-install Python packages in the ISO
-echo "Pre-installing Python packages in airootfs..."
-mkdir -p airootfs/tmp/pip-cache
-if [[ -d /cache/pip-cache ]]; then
-    echo "Copying wheel files to airootfs..."
-    cp /cache/pip-cache/*.whl airootfs/tmp/pip-cache/ 2>/dev/null || true
-
-    # Create installation script that will run IN the Docker container
-    cat > install-packages-in-airootfs.sh << 'INSTALLSCRIPT'
+# Create a custom hook to install Python and NPM packages during ISO build
+echo "Creating package installation hook..."
+mkdir -p airootfs/etc/pacman.d/hooks
+cat > airootfs/root/install-ai-packages.sh << 'PKGINSTALL'
 #!/bin/bash
-echo "Installing Python packages in airootfs chroot..."
-for wheel in /tmp/pip-cache/*.whl; do
-    if [[ -f "$wheel" ]]; then
-        echo "Installing $(basename $wheel)..."
-        chroot /build/profile/airootfs pip install --break-system-packages "$wheel" 2>/dev/null || true
-    fi
-done
-# Verify installation
-if chroot /build/profile/airootfs python -c "import fast_agent_mcp" 2>/dev/null; then
-    echo "✓ fast-agent-mcp installed successfully"
-else
-    echo "⚠ Warning: fast-agent-mcp not installed, trying pip install..."
-    chroot /build/profile/airootfs pip install --break-system-packages fast-agent-mcp
-fi
-# Clean up cache
-rm -rf /build/profile/airootfs/tmp/pip-cache
-INSTALLSCRIPT
-    chmod +x install-packages-in-airootfs.sh
-    ./install-packages-in-airootfs.sh
-    rm -f install-packages-in-airootfs.sh
-fi
+echo "Installing AI packages..."
 
-# Copy NPM packages
-echo "Copying NPM package cache..."
-mkdir -p airootfs/root/.npm-cache
-if [[ -d /cache/npm-cache ]]; then
-    cp -r /cache/npm-cache/* airootfs/root/.npm-cache/ 2>/dev/null || true
-fi
+# Install Python packages
+echo "Installing fast-agent-mcp..."
+pip install --break-system-packages fast-agent-mcp mcp || true
+
+# Install NPM packages
+echo "Installing MCP servers..."
+npm install -g @modelcontextprotocol/server-filesystem @modelcontextprotocol/server-fetch || true
+
+# Clean up pip cache to save space
+rm -rf /root/.cache/pip
+rm -rf /root/.npm
+
+echo "AI packages installed"
+PKGINSTALL
+chmod +x airootfs/root/install-ai-packages.sh
 
 # Create Ollama service directly in the image
 cat > airootfs/etc/systemd/system/ollama.service << 'OLLAMA'
@@ -338,6 +326,13 @@ cat > airootfs/etc/motd << 'MOTD'
  Commands: ai-installer, setup-ollama, ollama list
 ══════════════════════════════════════════════════════
 MOTD
+
+# Run the package installation before building ISO
+echo "Installing AI packages into airootfs..."
+arch-chroot /build/profile/airootfs /root/install-ai-packages.sh || true
+
+# Remove installation script to save space
+rm -f /build/profile/airootfs/root/install-ai-packages.sh
 
 # Build ISO
 mkarchiso -v -w /tmp/work -o /output /build/profile

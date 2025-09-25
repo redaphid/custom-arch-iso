@@ -66,19 +66,13 @@ echo "  • Ctrl+Alt+G - Release mouse grab"
 echo "  • Ctrl+C here - Stop QEMU"
 echo "═══════════════════════════════════════════════════════════"
 
-# Create a temporary disk image for QEMU (40GB sparse file)
-QEMU_DISK="/tmp/qemu-test-disk-$$.qcow2"
-echo "Creating temporary 40GB disk: $QEMU_DISK"
-qemu-img create -f qcow2 "$QEMU_DISK" 40G
-
-# Run QEMU with the ISO and disk
+# Run QEMU with the ISO (no hard disk - testing live environment)
 qemu-system-x86_64 \
     -enable-kvm \
     -cpu host \
     -m 8192 \
     -smp 4 \
     -drive file="$ISO",media=cdrom,readonly=on \
-    -drive file="$QEMU_DISK",if=virtio,format=qcow2 \
     -boot d \
     -vga virtio \
     -display gtk \
@@ -87,7 +81,3 @@ qemu-system-x86_64 \
     -device qemu-xhci \
     -device usb-kbd \
     -device usb-tablet
-
-# Clean up the temporary disk
-echo "Cleaning up temporary disk..."
-rm -f "$QEMU_DISK"
