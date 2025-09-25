@@ -127,36 +127,38 @@ fi
 mkdir -p airootfs/root
 ln -sf /var/lib/ollama airootfs/root/.ollama 2>/dev/null || true
 
-# Create customize_airootfs.sh script that runs during ISO build
-echo "Creating customize script for package installation..."
-cat > airootfs/root/customize_airootfs.sh << 'CUSTOMIZE'
-#!/bin/bash
+# CRITICAL: Pre-install packages NOW, not at runtime!
+echo "PRE-INSTALLING Python packages in chroot..."
 
-set -e -u
+# Method 1: Direct pip install in chroot
+arch-chroot airootfs pip install --break-system-packages fast-agent-mcp mcp 2>/dev/null || {
+    echo "Direct install failed, trying with cached wheels..."
 
-echo "Customizing airootfs..."
+    # Method 2: Install from cached wheels
+    if [[ -d /cache/pip-cache ]]; then
+        mkdir -p airootfs/tmp/pip-wheels
+        cp /cache/pip-cache/*.whl airootfs/tmp/pip-wheels/ 2>/dev/null || true
 
-# Install Python packages directly into the squashfs
-echo "Installing fast-agent-mcp..."
-pip install --break-system-packages fast-agent-mcp mcp
+        arch-chroot airootfs bash -c 'cd /tmp/pip-wheels && for w in *.whl; do pip install --break-system-packages "$w" 2>/dev/null; done'
+        rm -rf airootfs/tmp/pip-wheels
+    fi
+}
 
-# Install NPM packages (only filesystem server available for now)
-echo "Installing MCP servers..."
-npm install -g @modelcontextprotocol/server-filesystem 2>/dev/null || echo "NPM packages optional"
+# Verify installation
+if arch-chroot airootfs python -c "import fast_agent_mcp" 2>/dev/null; then
+    echo "✓ fast-agent-mcp successfully pre-installed in squashfs"
+else
+    echo "⚠ WARNING: fast-agent-mcp not installed, will download at runtime!"
+fi
 
-# Clean up to save space in the squashfs
-echo "Cleaning up caches..."
-rm -rf /root/.cache/pip
-rm -rf /root/.npm
-rm -rf /var/cache/pacman/pkg/*
+# Clean up caches to save space
+arch-chroot airootfs rm -rf /root/.cache/pip /root/.npm /var/cache/pacman/pkg/*
 
-# Set permissions
-chmod 755 /usr/local/bin/ai-installer 2>/dev/null || true
-chmod 755 /usr/bin/ai-installer 2>/dev/null || true
-
-echo "Customization complete"
-CUSTOMIZE
-chmod +x airootfs/root/customize_airootfs.sh
+# Enable SSH for debugging
+echo "Enabling SSH service..."
+arch-chroot airootfs systemctl enable sshd
+echo 'root:root' | arch-chroot airootfs chpasswd
+echo "PermitRootLogin yes" >> airootfs/etc/ssh/sshd_config
 
 # Create Ollama service directly in the image
 cat > airootfs/etc/systemd/system/ollama.service << 'OLLAMA'
@@ -334,7 +336,8 @@ cat > airootfs/etc/motd << 'MOTD'
          ARCH LINUX AI-POWERED INSTALLER
 ══════════════════════════════════════════════════════
  AI assistant will help you install Arch Linux
- Commands: ai-installer, setup-ollama, ollama list
+ Commands: ai-installer, ollama list
+ SSH access: root/root (for debugging)
 ══════════════════════════════════════════════════════
 MOTD
 
