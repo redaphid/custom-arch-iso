@@ -1,39 +1,23 @@
 #!/bin/bash
-# docker-build.sh - Build AI Installer ISO using Docker (no sudo needed if in docker group)
+# Build Arch Linux AI Installer ISO with Docker
+# This creates an ISO with Ollama, Qwen model, and fast-agent pre-installed
 
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SSH_KEY="${1:-$(cat ~/.ssh/id_ed25519.pub 2>/dev/null || cat ~/.ssh/id_rsa.pub 2>/dev/null || echo "")}"
-CACHE_DIR="$SCRIPT_DIR/tmp"
-
-if [[ -z "$SSH_KEY" ]]; then
-    echo "Warning: No SSH key found. Continuing without SSH access..."
-    SSH_KEY="# No SSH key provided"
-fi
-
-# Check if cache exists
-if [[ ! -d "$CACHE_DIR" ]] || [[ ! -d "$CACHE_DIR/models" ]]; then
-    echo "Error: Cache directory not found at $CACHE_DIR"
-    echo "Please run ./download-model.sh first to download dependencies"
-    exit 1
-fi
-
-# Check Docker access
-if ! docker info &>/dev/null 2>&1; then
-    echo "Cannot access Docker. Either:"
-    echo "  1. Add yourself to docker group: sudo usermod -aG docker $USER"
-    echo "     Then logout and login again"
-    echo "  2. Or run this script with sudo"
-    exit 1
-fi
+set -e
 
 echo "═══════════════════════════════════════════════════════════"
 echo "     Building Arch Linux AI Installer ISO with Docker"
 echo "═══════════════════════════════════════════════════════════"
+
+# Check for cached dependencies
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CACHE_DIR="$SCRIPT_DIR/tmp"
+if [[ ! -d "$CACHE_DIR" ]]; then
+    echo "Error: Cache directory not found. Run ./download-model.sh first!"
+    exit 1
+fi
+
 echo ""
 echo "Using cached dependencies from: $CACHE_DIR"
-echo ""
 
 # Save the original script directory before changing directories
 ORIGINAL_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,21 +35,20 @@ RUN pacman-key --init && pacman-key --populate archlinux
 WORKDIR /build
 EOF
 
-# Create the build script
+# Build Docker image
+echo "Building Docker image..."
+docker build -t archiso-ai-builder .
+
+# Create build script that runs inside container
 cat > build.sh << 'BUILDSCRIPT'
 #!/bin/bash
-set -euo pipefail
+set -e
 
-SSH_KEY="$1"
-
-# Copy releng profile
+echo "Setting up archiso profile..."
 cp -r /usr/share/archiso/configs/releng /build/profile
-cd /build/profile
 
-# Add packages
-cat >> packages.x86_64 << 'PACKAGES'
-
-# Core tools
+# Modify packages.x86_64 to include our requirements
+cat >> /build/profile/packages.x86_64 << 'PACKAGES'
 zellij
 tmux
 neovim
@@ -73,95 +56,98 @@ git
 base-devel
 linux-headers
 fish
-
-# Python and Node
 python
 python-pip
 nodejs
 npm
-
-# Network
 networkmanager
 openssh
 wget
 curl
-
-# System
 htop
 parted
 gptfdisk
 PACKAGES
 
-# SSH setup
-if [[ "$SSH_KEY" != "# No SSH key provided" ]]; then
-    mkdir -p airootfs/root/.ssh
-    echo "$SSH_KEY" > airootfs/root/.ssh/authorized_keys
-    chmod 700 airootfs/root/.ssh
-    chmod 600 airootfs/root/.ssh/authorized_keys
+# Copy cached files from host
+echo "Copying cached files..."
+mkdir -p /build/profile/airootfs/{usr/local/bin,var/lib/ollama,root/.config/fast-agent,etc/systemd/system,usr/bin}
+
+# Ollama binary
+if [[ -d /cache/ollama-binary ]]; then
+    echo "Installing Ollama binary..."
+    cp /cache/ollama-binary/ollama /build/profile/airootfs/usr/local/bin/
+    chmod +x /build/profile/airootfs/usr/local/bin/ollama
 fi
 
-# Enable services
-mkdir -p airootfs/etc/systemd/system/multi-user.target.wants
-ln -sf /usr/lib/systemd/system/sshd.service airootfs/etc/systemd/system/multi-user.target.wants/
-ln -sf /usr/lib/systemd/system/NetworkManager.service airootfs/etc/systemd/system/multi-user.target.wants/
-
-# Copy cached Ollama binary and models
-echo "Copying cached Ollama binary..."
-mkdir -p airootfs/usr/local/bin
-if [[ -f /cache/ollama-binary/ollama ]]; then
-    cp /cache/ollama-binary/ollama airootfs/usr/local/bin/
-    chmod +x airootfs/usr/local/bin/ollama
-else
-    echo "Warning: Cached Ollama binary not found"
-fi
-
-# Copy Ollama models to a system location (will be read-only in live environment)
-echo "Installing Ollama models into squashfs..."
-mkdir -p airootfs/var/lib/ollama
+# Ollama models
 if [[ -d /cache/models ]]; then
-    echo "Copying model files..."
-    cp -r /cache/models/* airootfs/var/lib/ollama/ 2>/dev/null || true
+    echo "Installing Ollama models..."
+    cp -r /cache/models/* /build/profile/airootfs/var/lib/ollama/
 fi
 
-# Create symlink for compatibility
-mkdir -p airootfs/root
-ln -sf /var/lib/ollama airootfs/root/.ollama 2>/dev/null || true
+# Create ai-installer command
+cat > /build/profile/airootfs/usr/local/bin/ai-installer << 'AIINSTALLER'
+#!/bin/bash
+exec python /root/ai-installer.py
+AIINSTALLER
+chmod +x /build/profile/airootfs/usr/local/bin/ai-installer
+ln -sf /usr/local/bin/ai-installer /build/profile/airootfs/usr/bin/ai-installer
 
-# CRITICAL: Pre-install packages NOW, not at runtime!
-echo "PRE-INSTALLING Python packages in chroot..."
+# Create the Python AI installer
+cat > /build/profile/airootfs/root/ai-installer.py << 'PYINSTALLER'
+#!/usr/bin/env python3
+import subprocess
+import time
+import sys
+import os
 
-# Method 1: Direct pip install in chroot
-arch-chroot airootfs pip install --break-system-packages fast-agent-mcp mcp 2>/dev/null || {
-    echo "Direct install failed, trying with cached wheels..."
+def main():
+    print("\n" + "="*60)
+    print("    ARCH LINUX AI-POWERED INSTALLER")
+    print("="*60)
 
-    # Method 2: Install from cached wheels
-    if [[ -d /cache/pip-cache ]]; then
-        mkdir -p airootfs/tmp/pip-wheels
-        cp /cache/pip-cache/*.whl airootfs/tmp/pip-wheels/ 2>/dev/null || true
+    # Start Ollama if not running
+    print("\nStarting Ollama service...")
+    subprocess.run(['systemctl', 'start', 'ollama'], check=False)
+    time.sleep(2)
 
-        arch-chroot airootfs bash -c 'cd /tmp/pip-wheels && for w in *.whl; do pip install --break-system-packages "$w" 2>/dev/null; done'
-        rm -rf airootfs/tmp/pip-wheels
-    fi
-}
+    print("\nLaunching fast-agent interactive mode...")
+    print("Type 'exit' to quit the AI assistant.")
+    print("-" * 60)
 
-# Verify installation
-if arch-chroot airootfs python -c "import fast_agent_mcp" 2>/dev/null; then
-    echo "✓ fast-agent-mcp successfully pre-installed in squashfs"
-else
-    echo "⚠ WARNING: fast-agent-mcp not installed, will download at runtime!"
-fi
+    # Launch fast-agent in interactive mode
+    try:
+        subprocess.run(['fast-agent', 'go'], check=False)
+    except KeyboardInterrupt:
+        print("\nExiting AI installer...")
+    except Exception as e:
+        print(f"Error launching fast-agent: {e}")
+        print("You can try running: fast-agent go")
 
-# Clean up caches to save space
-arch-chroot airootfs rm -rf /root/.cache/pip /root/.npm /var/cache/pacman/pkg/*
+if __name__ == "__main__":
+    main()
+PYINSTALLER
 
-# Enable SSH for debugging
-echo "Enabling SSH service..."
-arch-chroot airootfs systemctl enable sshd
-echo 'root:root' | arch-chroot airootfs chpasswd
-echo "PermitRootLogin yes" >> airootfs/etc/ssh/sshd_config
+# Create fast-agent configuration
+cat > /build/profile/airootfs/root/.config/fast-agent/fastagent.config.yaml << 'CONFIG'
+default_model: "generic.qwen2.5:7b"
+logger:
+  level: "info"
+  type: "console"
+  progress_display: true
+  show_chat: true
+  show_tools: true
+mcp:
+  servers:
+    filesystem:
+      transport: "stdio"
+      command: "npx"
+      args: ["@modelcontextprotocol/server-filesystem", "/"]
+CONFIG
 
-# Create Ollama service directly in the image
-cat > airootfs/etc/systemd/system/ollama.service << 'OLLAMA'
+# Create Ollama service
+cat > /build/profile/airootfs/etc/systemd/system/ollama.service << 'OLLAMASVC'
 [Unit]
 Description=Ollama
 After=network-online.target
@@ -178,187 +164,113 @@ User=root
 
 [Install]
 WantedBy=multi-user.target
-OLLAMA
+OLLAMASVC
 
-# Enable the service
-ln -sf /etc/systemd/system/ollama.service airootfs/etc/systemd/system/multi-user.target.wants/
+# Enable services
+mkdir -p /build/profile/airootfs/etc/systemd/system/multi-user.target.wants
+ln -sf /etc/systemd/system/ollama.service /build/profile/airootfs/etc/systemd/system/multi-user.target.wants/
+ln -sf /usr/lib/systemd/system/sshd.service /build/profile/airootfs/etc/systemd/system/multi-user.target.wants/
 
-# Create ai-installer command
-mkdir -p airootfs/usr/local/bin
-cat > airootfs/usr/local/bin/ai-installer << 'AICOMMAND'
-#!/bin/bash
-python /root/ai-installer.py
-AICOMMAND
-chmod +x airootfs/usr/local/bin/ai-installer
+# Create auto-start service for AI installer
+cat > /build/profile/airootfs/etc/systemd/system/ai-installer.service << 'AISVC'
+[Unit]
+Description=AI Installer Auto-Start
+After=multi-user.target ollama.service
+Wants=ollama.service
 
-# Make it available in PATH
-mkdir -p airootfs/usr/bin
-ln -sf /usr/local/bin/ai-installer airootfs/usr/bin/ai-installer
+[Service]
+Type=idle
+ExecStart=/usr/bin/fast-agent go
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+Restart=on-failure
+User=root
+WorkingDirectory=/root
 
-# Fast-agent installer (uses cached packages)
-cat > airootfs/usr/local/bin/setup-fastagent << 'FASTAGENT'
-#!/bin/bash
-echo "Setting up Fast-Agent configuration..."
+[Install]
+WantedBy=multi-user.target
+AISVC
+ln -sf /etc/systemd/system/ai-installer.service /build/profile/airootfs/etc/systemd/system/multi-user.target.wants/
 
-# Install from cached NPM packages
-if [[ -d /root/.npm-cache ]] && ls /root/.npm-cache/*.tgz &>/dev/null; then
-    echo "Installing NPM packages from cache..."
-    for pkg in /root/.npm-cache/*.tgz; do
-        npm install -g "$pkg" 2>/dev/null || true
-    done
-else
-    echo "No NPM cache found, downloading..."
-    npm install -g @modelcontextprotocol/server-filesystem @modelcontextprotocol/server-fetch
-fi
-
-# Config
-mkdir -p /root/.config/fast-agent
-cat > /root/.config/fast-agent/fastagent.config.yaml << 'CFG'
-default_model: "generic.qwen2.5:7b"
-logger:
-  level: "info"
-  type: "console"
-  progress_display: true
-  show_chat: true
-  show_tools: true
-mcp:
-  servers:
-    filesystem:
-      transport: "stdio"
-      command: "npx"
-      args: ["@modelcontextprotocol/server-filesystem", "/"]
-    fetch:
-      transport: "stdio"
-      command: "npx"
-      args: ["@modelcontextprotocol/server-fetch"]
-CFG
-echo "Fast-Agent ready!"
-FASTAGENT
-chmod +x airootfs/usr/local/bin/setup-fastagent
-
-# AI installer (simplified - everything pre-installed)
-cat > airootfs/root/ai-installer.py << 'AIINSTALLER'
-#!/usr/bin/env python3
-"""
-Arch Linux AI-Powered Installer
-"""
-import os
-import sys
-import subprocess
-import time
-
-def main():
-    """Main installer function"""
-    print("\n" + "="*60)
-    print("    ARCH LINUX AI-POWERED INSTALLER")
-    print("="*60)
-
-    # Ensure services are running
-    print("\nStarting AI services...")
-    subprocess.run(['systemctl', 'start', 'ollama'], check=False)
-    time.sleep(3)
-
-    print("\n" + "="*60)
-    print("    Welcome to AI-Powered Arch Linux Installer!")
-    print("="*60)
-    print("\nI'm your AI assistant for installing Arch Linux.")
-    print("I can help you with:")
-    print("  • Partitioning disks")
-    print("  • Formatting filesystems")
-    print("  • Installing base system")
-    print("  • Configuring bootloader")
-    print("  • Setting up networking")
-    print("  • And much more!")
-    print("\nYou can ask me anything about the installation process.")
-    print("Type 'exit' or Ctrl+C to quit.\n")
-
-    # Initialize and run the CLI
-    try:
-        # Try importing with the correct module name
-        from fast_agent_mcp import FastAgentCLI
-        cli = FastAgentCLI()
-        cli.run()
-    except ImportError:
-        try:
-            # Alternative import path
-            import fast_agent_mcp.cli as cli_module
-            cli = cli_module.FastAgentCLI()
-            cli.run()
-        except ImportError as e:
-            print(f"Error: Could not import Fast-Agent: {e}")
-            print("\nTrying to install dependencies...")
-            subprocess.run(['pip', 'install', '--break-system-packages', 'fast-agent-mcp'])
-            print("\nPlease restart the installer.")
-    except KeyboardInterrupt:
-        print("\n\nInstaller interrupted. You can restart by running:")
-        print("  python /root/ai-installer.py")
-    except Exception as e:
-        print(f"\nError running AI assistant: {e}")
-        print("You can try manual installation or restart the installer.")
-
-if __name__ == "__main__":
-    main()
-AIINSTALLER
-chmod +x airootfs/root/ai-installer.py
-
-# First boot setup - just start services and run installer
-cat > airootfs/root/first-boot.sh << 'FIRSTBOOT'
-#!/bin/bash
-# Start ollama service
-systemctl start ollama 2>/dev/null
-sleep 2
-
-# Run the AI installer
-ai-installer
-FIRSTBOOT
-chmod +x airootfs/root/first-boot.sh
-
-# Auto-login
-mkdir -p airootfs/etc/systemd/system/getty@tty1.service.d
-cat > airootfs/etc/systemd/system/getty@tty1.service.d/autologin.conf << 'AUTO'
+# Auto-login configuration
+mkdir -p /build/profile/airootfs/etc/systemd/system/getty@tty1.service.d
+cat > /build/profile/airootfs/etc/systemd/system/getty@tty1.service.d/autologin.conf << 'AUTOLOGIN'
 [Service]
 ExecStart=
 ExecStart=-/sbin/agetty -o '-p -f -- \\u' --noclear --autologin root %I $TERM
-AUTO
+AUTOLOGIN
 
-# Bash profile
-cat > airootfs/root/.bash_profile << 'PROF'
-# Auto-start AI installer on login
-if [ -z "$AI_INSTALLER_RUNNING" ]; then
-    export AI_INSTALLER_RUNNING=1
-    ai-installer
+# Create a script to install Python packages AFTER the system is built
+cat > /build/profile/airootfs/root/.install-packages.sh << 'INSTALLPKGS'
+#!/bin/bash
+# This will be run by customize_airootfs.sh
+echo "Installing Python packages..."
+pip install --break-system-packages fast-agent-mcp mcp 2>/dev/null || {
+    # Try installing from wheels if available
+    if [[ -d /tmp/pip-wheels ]]; then
+        cd /tmp/pip-wheels
+        for wheel in *.whl; do
+            [ -f "$wheel" ] && pip install --break-system-packages "$wheel" 2>/dev/null
+        done
+    fi
+}
+
+# Verify installation
+python -c "import fast_agent_mcp" && echo "✓ fast-agent-mcp installed" || echo "⚠ fast-agent-mcp missing"
+
+# Clean up
+rm -rf /root/.cache/pip /tmp/pip-wheels
+INSTALLPKGS
+chmod +x /build/profile/airootfs/root/.install-packages.sh
+
+# Create customize_airootfs.sh for mkarchiso to run
+cat > /build/profile/airootfs/root/customize_airootfs.sh << 'CUSTOMIZE'
+#!/bin/bash
+set -e -u
+
+echo "Customizing airootfs..."
+
+# Run package installation
+/root/.install-packages.sh
+
+# Set root password for SSH debugging
+echo 'root:root' | chpasswd
+echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+
+# Clean up
+rm -rf /var/cache/pacman/pkg/*
+rm -f /root/.install-packages.sh
+
+echo "Customization complete"
+CUSTOMIZE
+chmod +x /build/profile/airootfs/root/customize_airootfs.sh
+
+# Copy pip wheels if available
+if [[ -d /cache/pip-cache ]]; then
+    echo "Copying pip wheels for installation..."
+    mkdir -p /build/profile/airootfs/tmp/pip-wheels
+    cp /cache/pip-cache/*.whl /build/profile/airootfs/tmp/pip-wheels/ 2>/dev/null || true
 fi
-PROF
 
-# MOTD
-cat > airootfs/etc/motd << 'MOTD'
-══════════════════════════════════════════════════════
-         ARCH LINUX AI-POWERED INSTALLER
-══════════════════════════════════════════════════════
- AI assistant will help you install Arch Linux
- Commands: ai-installer, ollama list
- SSH access: root/root (for debugging)
-══════════════════════════════════════════════════════
-MOTD
-
-# Build ISO - mkarchiso will automatically run customize_airootfs.sh
-echo "Building ISO (customize_airootfs.sh will run automatically)..."
+# Build the ISO
+echo "Building ISO with mkarchiso..."
 mkarchiso -v -w /tmp/work -o /output /build/profile
-BUILDSCRIPT
 
+echo "Build complete!"
+BUILDSCRIPT
 chmod +x build.sh
 
-# Build Docker image
-echo "Building Docker image..."
-docker build -t archiso-ai-builder .
-
-# Run build in container
+# Run build in Docker container with cache mounted
 echo "Building ISO (this will take several minutes)..."
 docker run --rm --privileged \
-    -v "$BUILD_DIR:/output" \
+    -v "$BUILD_DIR:/build" \
     -v "$CACHE_DIR:/cache:ro" \
+    -v "$BUILD_DIR:/output" \
     archiso-ai-builder \
-    /output/build.sh "$SSH_KEY"
+    /build/build.sh
 
 # Find ISO
 ISO=$(find "$BUILD_DIR" -name "*.iso" -type f | head -n1)
@@ -371,8 +283,7 @@ fi
 OUTPUT_DIR="$ORIGINAL_SCRIPT_DIR/isos"
 mkdir -p "$OUTPUT_DIR"
 
-# Copy to isos directory with ISO 8601 date format
-# Format: arch-ai-installer-YYYYMMDD-HHMMSS.iso
+# Copy to output directory with timestamp
 ISO_DATE=$(date +%Y%m%d-%H%M%S)
 FINAL_ISO="arch-ai-installer-${ISO_DATE}.iso"
 FINAL_PATH="$OUTPUT_DIR/$FINAL_ISO"
@@ -380,16 +291,16 @@ FINAL_PATH="$OUTPUT_DIR/$FINAL_ISO"
 echo "Copying ISO to: $FINAL_PATH"
 cp "$ISO" "$FINAL_PATH"
 
-# Verify copy succeeded
+# Verify file exists
 if [[ ! -f "$FINAL_PATH" ]]; then
     echo "Error: Failed to copy ISO to $FINAL_PATH"
-    echo "ISO is still available at: $ISO"
-    echo "Skipping cleanup to preserve ISO"
-else
-    # Cleanup build directory (but preserve the ISO in isos/)
-    echo "Cleaning up build directory..."
-    rm -rf "$BUILD_DIR"
+    exit 1
 fi
+
+# Clean up
+echo "Cleaning up build directory..."
+cd "$ORIGINAL_SCRIPT_DIR"
+rm -rf "$BUILD_DIR"
 
 echo ""
 echo "═══════════════════════════════════════════════════════════"
@@ -400,4 +311,7 @@ echo "Size: $(du -h "$FINAL_PATH" 2>/dev/null | cut -f1)"
 echo ""
 echo "Test with: ./test-iso.sh"
 echo "Or specify: ./test-iso.sh $FINAL_PATH"
+echo ""
+echo "The ISO will boot directly into fast-agent AI assistant!"
+echo "SSH access available: root/root (for debugging)"
 echo "═══════════════════════════════════════════════════════════"

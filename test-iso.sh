@@ -58,26 +58,28 @@ echo "════════════════════════�
 echo "ISO: $ISO"
 echo "Size: $(du -h "$ISO" | cut -f1)"
 echo ""
-echo "Starting QEMU..."
-echo "Once booted, the AI assistant should start automatically!"
+echo "Starting QEMU with optimizations for LLM..."
+echo "Once booted, fast-agent should start automatically!"
 echo ""
 echo "Controls:"
 echo "  • Ctrl+Alt+G - Release mouse grab"
 echo "  • Ctrl+C here - Stop QEMU"
+echo "  • SSH access: ssh -p 2222 root@localhost (password: root)"
 echo "═══════════════════════════════════════════════════════════"
 
-# Run QEMU with the ISO (no hard disk - testing live environment)
+# Run QEMU with optimizations for running Qwen LLM
 qemu-system-x86_64 \
     -enable-kvm \
     -cpu host \
-    -m 8192 \
-    -smp 4 \
+    -m 16384 \
+    -smp 8 \
     -drive file="$ISO",media=cdrom,readonly=on \
     -boot d \
     -vga virtio \
     -display gtk \
     -device virtio-net-pci,netdev=net0 \
-    -netdev user,id=net0 \
+    -netdev user,id=net0,hostfwd=tcp::2222-:22 \
     -device qemu-xhci \
     -device usb-kbd \
-    -device usb-tablet
+    -device usb-tablet \
+    -machine type=q35,accel=kvm
