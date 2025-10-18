@@ -94,10 +94,33 @@ If the build fails:
 - Verify tmp/ cache directory exists after running download-model.sh
 - Check Docker logs if ISO generation fails
 
+## Partition Resize Tools (Experimental)
+
+The ISO includes partition resize scripts for dual-boot setup:
+- `resize-linux-for-windows` - Automated script to resize Linux partition
+- `resize-for-windows` - Shortcut command
+- Custom MOTD with partition resize instructions
+
+**Note**: Current build has issues with file permissions during ISO creation. For production use, download a standard Arch ISO and use the standalone script in `../mechs/back-to-windows/resize-partition.sh` instead.
+
+## Build Optimization (WIP)
+
+Several optimized build scripts are available:
+- `docker-build-optimized.sh` - Uses persistent pacman cache
+- `docker-build-layered.sh` - Caches packages in Docker layers (experimental)
+- `docker-build-fast.sh` - Layer-based caching for faster rebuilds
+
+**Known Issues**:
+- Permission errors during `customize_airootfs.sh` phase
+- ISO boots to GRUB but may hang at kernel load
+- Package downloads not fully cached in Docker layers yet
+
+For reliable partition resizing, use standard Arch ISO + standalone script.
+
 ## Technical Details
 
 - **Base**: Arch Linux live environment with archiso
 - **LLM Runtime**: Ollama serving Qwen2.5 7B model
 - **Interface**: fast-agent-mcp Python package
 - **MCP Servers**: filesystem and fetch for system access
-- **Size**: ~1.7GB ISO with embedded models
+- **Size**: ~1.7GB ISO with embedded models (or ~11GB with partition tools)

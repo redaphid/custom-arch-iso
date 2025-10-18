@@ -48,3 +48,4 @@ __z*
 tmp/
 *.qcow2
 isos/
+.pacman-cache
